@@ -1,0 +1,304 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - name: Create project files
+        run: |
+          mkdir -p $(dirname settings.gradle.kts)
+          cat > settings.gradle.kts <<'EOF_FILE'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "AutoClicker"
+          include(":app")
+          EOF_FILE
+          mkdir -p $(dirname build.gradle.kts)
+          cat > build.gradle.kts <<'EOF_FILE'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF_FILE
+          mkdir -p $(dirname app/build.gradle.kts)
+          cat > app/build.gradle.kts <<'EOF_FILE'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.yahya.autoclicker"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.yahya.autoclicker"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          EOF_FILE
+          mkdir -p $(dirname app/src/main/AndroidManifest.xml)
+          cat > app/src/main/AndroidManifest.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:label="Auto Clicker"
+                  android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <service
+                      android:name=".ClickService"
+                      android:exported="false"
+                      android:label="Auto Clicker"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService"/>
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_config"/>
+                  </service>
+              </application>
+          </manifest>
+          EOF_FILE
+          mkdir -p $(dirname app/src/main/res/xml/accessibility_config.xml)
+          cat > app/src/main/res/xml/accessibility_config.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:canPerformGestures="true"
+              android:description="@string/service_desc"/>
+          EOF_FILE
+          mkdir -p $(dirname app/src/main/res/values/strings.xml)
+          cat > app/src/main/res/values/strings.xml <<'EOF_FILE'
+          <resources>
+              <string name="service_desc">Taps the screen at the spot you choose, at a set interval.</string>
+          </resources>
+          EOF_FILE
+          mkdir -p $(dirname app/src/main/java/com/yahya/autoclicker/MainActivity.kt)
+          cat > app/src/main/java/com/yahya/autoclicker/MainActivity.kt <<'EOF_FILE'
+          package com.yahya.autoclicker
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.net.Uri
+          import android.view.Gravity
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import android.widget.Toast
+
+          class MainActivity : Activity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val layout = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      gravity = Gravity.CENTER
+                      setPadding(48, 48, 48, 48)
+                  }
+                  layout.addView(TextView(this).apply {
+                      textSize = 16f
+                      text = "Enter a USSD code below. This opens the phone dialer; review the code and press Call yourself.\\n\\n" +
+                          "To use the clicker, enable its Accessibility service, then drag the red dot to the desired screen location."
+                  })
+
+                  val codeInput = EditText(this).apply {
+                      hint = "USSD code, e.g. *806*9299367*4#"
+                      setSingleLine(true)
+                      setText("*806*9299367*4#")
+                  }
+                  layout.addView(codeInput)
+
+                  layout.addView(Button(this).apply {
+                      text = "Open Dialer"
+                      setOnClickListener {
+                          val code = codeInput.text.toString().trim()
+                          if (code.isBlank()) {
+                              Toast.makeText(this@MainActivity, "Enter a USSD code first", Toast.LENGTH_SHORT).show()
+                          } else {
+                              // Keep # in the dial string by encoding it for the tel: URI.
+                              val dialString = code.replace("#", "%23")
+                              startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + dialString)))
+                          }
+                      }
+                  })
+
+                  layout.addView(Button(this).apply {
+                      text = "Open Accessibility Settings"
+                      setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+                  })
+                  setContentView(layout)
+              }
+          }
+          EOF_FILE
+          mkdir -p $(dirname app/src/main/java/com/yahya/autoclicker/ClickService.kt)
+          cat > app/src/main/java/com/yahya/autoclicker/ClickService.kt <<'EOF_FILE'
+          package com.yahya.autoclicker
+
+          import android.accessibilityservice.AccessibilityService
+          import android.accessibilityservice.GestureDescription
+          import android.graphics.Color
+          import android.graphics.Path
+          import android.graphics.PixelFormat
+          import android.graphics.drawable.GradientDrawable
+          import android.os.Handler
+          import android.os.Looper
+          import android.view.Gravity
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.WindowManager
+          import android.view.accessibility.AccessibilityEvent
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.TextView
+
+          class ClickService : AccessibilityService() {
+
+              private lateinit var wm: WindowManager
+              private lateinit var target: View
+              private lateinit var panel: LinearLayout
+              private lateinit var targetParams: WindowManager.LayoutParams
+              private lateinit var startBtn: Button
+              private lateinit var delayText: TextView
+
+              private val handler = Handler(Looper.getMainLooper())
+              private var running = false
+              private var intervalMs = 2000L
+              private val dot = 110 // target size in px
+
+              private val tick = object : Runnable {
+                  override fun run() {
+                      if (!running) return
+                      tap()
+                      handler.postDelayed(this, intervalMs)
+                  }
+              }
+
+              override fun onServiceConnected() {
+                  wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                  buildTarget()
+                  buildPanel()
+              }
+
+              private fun overlayParams(w: Int, h: Int, touchable: Boolean) = WindowManager.LayoutParams(
+                  w, h,
+                  WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                  WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                      (if (touchable) 0 else WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE),
+                  PixelFormat.TRANSLUCENT
+              ).apply { gravity = Gravity.TOP or Gravity.START }
+
+              private fun buildTarget() {
+                  target = View(this).apply {
+                      background = GradientDrawable().apply {
+                          shape = GradientDrawable.OVAL
+                          setColor(Color.argb(150, 255, 0, 0))
+                          setStroke(6, Color.WHITE)
+                      }
+                  }
+                  targetParams = overlayParams(dot, dot, true).apply { x = 300; y = 800 }
+                  var dx = 0f; var dy = 0f; var sx = 0; var sy = 0
+                  target.setOnTouchListener { _, e ->
+                      when (e.action) {
+                          MotionEvent.ACTION_DOWN -> { dx = e.rawX; dy = e.rawY; sx = targetParams.x; sy = targetParams.y }
+                          MotionEvent.ACTION_MOVE -> {
+                              targetParams.x = sx + (e.rawX - dx).toInt()
+                              targetParams.y = sy + (e.rawY - dy).toInt()
+                              wm.updateViewLayout(target, targetParams)
+                          }
+                      }
+                      true
+                  }
+                  wm.addView(target, targetParams)
+              }
+
+              private fun buildPanel() {
+                  panel = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
+                      setBackgroundColor(Color.argb(220, 30, 30, 30))
+                      setPadding(16, 8, 16, 8)
+                  }
+                  val minus = Button(this).apply { text = "-"; setOnClickListener { changeDelay(-500) } }
+                  val plus = Button(this).apply { text = "+"; setOnClickListener { changeDelay(500) } }
+                  delayText = TextView(this).apply { setTextColor(Color.WHITE); setPadding(16, 0, 16, 0) }
+                  startBtn = Button(this).apply { text = "START"; setOnClickListener { if (running) stopClicking() else startClicking() } }
+                  listOf(minus, delayText, plus, startBtn).forEach { panel.addView(it) }
+                  updateDelayText()
+
+                  val p = overlayParams(WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT, true)
+                      .apply { gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; y = 120 }
+                  wm.addView(panel, p)
+              }
+
+              private fun changeDelay(delta: Long) {
+                  intervalMs = (intervalMs + delta).coerceIn(500L, 30000L)
+                  updateDelayText()
+              }
+
+              private fun updateDelayText() { delayText.text = "${intervalMs / 1000.0}s" }
+
+              private fun startClicking() {
+                  running = true
+                  startBtn.text = "STOP"
+                  // let taps pass through the dot to the app underneath
+                  targetParams.flags = targetParams.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                  wm.updateViewLayout(target, targetParams)
+                  handler.post(tick)
+              }
+
+              private fun stopClicking() {
+                  running = false
+                  handler.removeCallbacks(tick)
+                  startBtn.text = "START"
+                  targetParams.flags = targetParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+                  wm.updateViewLayout(target, targetParams)
+              }
+
+              private fun tap() {
+                  val loc = IntArray(2)
+                  target.getLocationOnScreen(loc)
+                  val path = Path().apply { moveTo(loc[0] + dot / 2f, loc[1] + dot / 2f) }
+                  val gesture = GestureDescription.Builder()
+                      .addStroke(GestureDescription.StrokeDescription(path, 0, 50))
+                      .build()
+                  dispatchGesture(gesture, null, null)
+              }
+
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+              override fun onInterrupt() { if (running) stopClicking() }
+
+              override fun onDestroy() {
+                  handler.removeCallbacks(tick)
+                  runCatching { wm.removeView(target) }
+                  runCatching { wm.removeView(panel) }
+                  super.onDestroy()
+              }
+          }
+          EOF_FILE
+      - name: Build
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AutoClicker-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
